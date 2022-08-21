@@ -1,6 +1,31 @@
 #!/usr/local/bin/perl -w
 use Data::Dumper;
 use IPC::Open2;
+
+# Small tool to help analysing object files ( preferably *.o understood by objdump )
+# This will create annotated source-html and a graphviz file showing the call graphs
+#
+#
+# Read and parse and create dot file and related hrefs html using pandoc
+# Usage:
+# perl  parse_object_files.pl $(cat cont.list) -savedb files_loaded.db tags analysis -savedb analysed.db html new.dot && dot   -Tsvg new.dot -o html/out.svg
+#
+# or 
+# perl parse_object_files.pl analysed.db html new.dot && dot   -Tsvg new.dot -o html/out.svg
+# Inputs accepted:
+#     *.o  : object files to be parsed by objdump
+#     *.db : perl-database containing all current state (to restore state)
+#     -savedb *.db :  Save database state into file
+#     analysis :  post process loaded objects and link relations (optional)
+#     tags : load source references also from tags file
+#            (future:  use '-g' from object format to find source locations )
+#     html : use pandoc to create annotated html sources (stored in ./html/* )
+#     *.dot : Create dot format of understood content  (url references to html files
+#
+#  parsing of dot files:  dot   -Tsvg new.dot -o html/out.svg
+#
+#
+
 $Data::Dumper::Sortkeys = 1;
 $Data::Dumper::Purity = 1;
 use lib ".";
@@ -23,6 +48,7 @@ while (@ARGV) {
 	} elsif (/tags$/ && -r $_) {
 		load_tags($_,$database);
 	} elsif (/\.dot$/) {
+	    	analysis($database) unless $database->{"#Analysed"};
 		save_dot($_);
 	} elsif (/^-savedb$/) {
 		save_db(shift @ARGV);
@@ -121,42 +147,15 @@ sub analysis {
 			next unless ref $$calledFunction;  
 			# print STDERR " -> $_\n";
 
-			# $$calledFunction->{"#CalledBy"}->{$fname} = $thisFunction;
 			$$calledFunction->{"#CalledBy"}->{$fname}++;
 			$calling->{$_} = $calledFunction;
 		}
 	}
 	#die Dumper($allfuns);
+	$database->{"#Analysed"} = "yes";
 	return;
 
-
-
-	foreach $fun ( keys %$allfuns ) {
-		next if  $fun =~ /^#/;
-		# my $thisFunction  = $allfuns->{$fun};
-		my $thisFunction  = $allfuns->{$fun};
-		foreach ( keys %{$thisFunction->{"#Calls"}} ) { 
-			my $calledFunction = $allfuns->{$_};
-			next unless defined( $calledFunction );
-
-			next unless ref $thisFunction->{$_}  eq "";
-			# Link this & called
-			$calledFunction->{"#CalledBy"}->{$_}++;
-
-			# For each file in called function, tell it has been called by this
-			my @calledFiles = @{$calledFunction->{"#File"}};
-			foreach (@calledFiles) {
-
-				$thisFunction->{"#CalledFrom"}->{$_}++;
-			}
-			foreach $file ( @{$thisFunction->{"#File"}}) {
-				foreach $called ( @calledFiles ) {
-					$allfiles->{$file}->{"#Calls"}->{$called}++;
-				}
-			}
-
-		}
-	}
+	## Maybe link file sections too ?
 }
 
 
@@ -271,6 +270,7 @@ sub load_tags {
 		# $sym->{$2}->{objc} = $allFun->{$1}->{"#File"};
 		# $fun->{"#Loc"}= { $2 => $3 };
 	}
+	$database->{"#Tags"} = $tag;
 }
 
 
@@ -393,6 +393,8 @@ sub load_db {
 sub load_elf {
 	my $f = shift;
 	my $database = shift;
+	delete $database->{"#Tags"};
+	delete $database->{"#Analysed"};
 	my @cmd = qw{objdump -t  -d -r};
 	open(my $dmp,"-|",@cmd,$f) or die "$?";
 	my @res = <$dmp>;
