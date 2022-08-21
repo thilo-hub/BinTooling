@@ -1,90 +1,152 @@
+#!/usr/local/bin/perl -w
 use Data::Dumper;
 use IPC::Open2;
+$Data::Dumper::Sortkeys = 1;
+$Data::Dumper::Purity = 1;
+use lib ".";
 $nodenum=1;
+# my $db = eval { do "./out1.db"};
 
 my $database = {};
-foreach(@ARGV) {
-	open(my $in,"<",$_) or next;
-	$database = loadFiles($database,$in);
+while (@ARGV) {
+	$_ = shift @ARGV;
+	if (/\.db$/ ) {
+		load_db($_);
+	} elsif (/\.o$/) {
+		load_elf($_,$database);
+	} elsif (/\.log$/) {
+		load_log($_);
+	} elsif (/^analysis/) {
+		analysis($database);
+	} elsif (/^html$/) {
+		load_sources($database);
+	} elsif (/tags$/ && -r $_) {
+		load_tags($_,$database);
+	} elsif (/\.dot$/) {
+		save_dot($_);
+	} elsif (/^-savedb$/) {
+		save_db(shift @ARGV);
+	} else {
+		die "Filename bad: $_";
+	}
 }
-$Data::Dumper::Sortkeys = 1;
 
-analysis($database);
+
+exit 0;
 # analysis2 --- not yet
 
 #print Dumper($database); exit 0;
 
-my $main="main";
-my $dotout = "digraph \"$main\" {\n";
+sub save_dot {
+	my $dotfile=shift;
+	my $main="main";
+	my $dotout = "digraph \"$main\" {\n";
 
-load_tags($database);
-load_sources($database);
-$main=$database->{"#Functions"}{$main};
-outCallChain( \$dotout,"main", $main );
-#print Dumper($database); exit 0;
-outNodes(\$dotout,"TOP",$database->{"#Files"});
-$dotout .= "\n}\n";
-print $dotout;
+	# load_sources($database);
+	$main=$database->{"#Functions"}{$main};
+	outCallChain( \$dotout,"main", $main );
+	#print Dumper($database); exit 0;
+	outNodes(\$dotout,"TOP",$database->{"#Files"});
+	$dotout .= "\n}\n";
+	open(DOT,">",$dotfile);
+	print DOT $dotout;
+	close(DOT);
+	print STDERR "Dot: $dotfile written\n";
+}
 
 
-open(DB,">","care.db");
-print DB Dumper($database);
-close(DB);
+sub save_db {
+	my $save_db = shift;
+	open(DB,">",$save_db);
+	print DB Dumper($database);
+	close(DB);
+	print STDERR "Database saved: $save_db\n";
+}
 
-exit 0;
 
-sub loadFiles {
+sub parseDmp {
+	my $dmp=shift;
 	my $database = shift;
-	my $in=shift;
+
 	my $currentFunction={};
 	my $currentFile={};
 	my $fun="???";
 	my $file="???";
 
-	sub fun { 
+	my $recordFile = sub {
+		$file = shift;
+	    	$currentFile     = \$database->{"#Files"}->{$file};
+
+	};
+	my $recordFun = sub { 
 	    $fun = shift; 
 	    $currentFunction = \$database->{"#Functions"}->{$fun};
-	    $currentFile     = \$database->{"#Files"}->{$file};
-
 	    push @{$$currentFunction->{"#File"}}, $file;
-	    #push @{$database->{"#Files"}->{$file}->{"#Defined"}},$fun;
-	    $database->{"#Files"}->{$file}->{"#Defined"}->{$fun}=-1;
-	}
-	sub refer {
+
+	    $$currentFile->{"#Defined"}->{$fun}=-1;
+	};
+	my $recordRefer = sub {
 	    my $fun = shift;
-	    $$currentFunction->{$fun}++;
+	    $$currentFunction->{"#Calls"}->{$fun}++;
 	    # Not used here, tags sets these 
 	     $$currentFile->{"#Links"}->{$fun}++;
 
 
-	}
-
-
-	while (<$in>) {
+	};
+	foreach( @$dmp) {
 	    chomp;
-	    $file = $1 if /^(.*):\s+file\s+format/;
-	    fun($1) if /^[0-9a-f]+\s<([^>]+)>/;
-	    refer($1)  if /: R_[A-Z0-9_]+\s+([^\.]\S+?)(\+0x[0-9a-f]+)?$/;
-	    refer($1)  if /:\s.* <(\S+)\@plt>/;
+	    &$recordFile($1) if /^(.*):\s+file\s+format/;
+	    $$currentFile->{"#SomeSource"} = $1 if /\sdf\s+\*ABS\*\s+0+\s(.*\.c)$/;
+	    &$recordFun($1) if /^[0-9a-f]+\s<([^>]+)>/;
+	    &$recordRefer($1)  if /: R_[A-Z0-9_]+\s+([^\.]\S+?)(\+0x[0-9a-f]+)?$/;
+	    &$recordRefer($1)  if /:\s.* <(\S+)\@plt>/;
 	}
 	return $database;
 }
-
 sub analysis {
 	my $database = shift;
 	my $allfuns = $database->{"#Functions"};
 	my $allfiles= $database->{"#Files"};
+
+	# Link functions together
+	foreach $fname ( keys %$allfuns ) {
+		my $thisFunction = $allfuns->{$fname};
+		my $calling = $thisFunction->{"#Calls"};
+		next unless $calling;
+		# print STDERR "Fix: $fname\n";
+
+		foreach ( keys %$calling ){
+			next if ref $calling->{$_};
+			my $calledFunction = \$allfuns->{$_};
+			next unless ref $$calledFunction;  
+			# print STDERR " -> $_\n";
+
+			# $$calledFunction->{"#CalledBy"}->{$fname} = $thisFunction;
+			$$calledFunction->{"#CalledBy"}->{$fname}++;
+			$calling->{$_} = $calledFunction;
+		}
+	}
+	#die Dumper($allfuns);
+	return;
+
+
+
 	foreach $fun ( keys %$allfuns ) {
 		next if  $fun =~ /^#/;
+		# my $thisFunction  = $allfuns->{$fun};
 		my $thisFunction  = $allfuns->{$fun};
-		foreach ( keys %$thisFunction ) { 
-			next if /^#/;
+		foreach ( keys %{$thisFunction->{"#Calls"}} ) { 
 			my $calledFunction = $allfuns->{$_};
+			next unless defined( $calledFunction );
+
 			next unless ref $thisFunction->{$_}  eq "";
-			next unless defined( $allfuns->{$_} ); 
-			$calledFunction->{"#CalledBy"}->{$_}++ if defined $calledFunction;
-			my @calledFiles = @{$allfuns->{$_}->{"#File"}};
+			# Link this & called
+			$calledFunction->{"#CalledBy"}->{$_}++;
+
+			# For each file in called function, tell it has been called by this
+			my @calledFiles = @{$calledFunction->{"#File"}};
 			foreach (@calledFiles) {
+
 				$thisFunction->{"#CalledFrom"}->{$_}++;
 			}
 			foreach $file ( @{$thisFunction->{"#File"}}) {
@@ -126,44 +188,47 @@ sub analysis2 {
 sub outCallChain {
     my $dotout = shift;
     my $files;
-    out(@_);
+    *dotOut = sub {
+	my ( $name, $itm ) = @_;  print("CK:$name\n");
+	    return if $itm->{"#Done"}++;
+	    foreach( @{$itm->{"#File"}}) {
+		    $files->{$_}++;
+	    }
+	    my $calls = $itm->{"#Calls"};
+	    while ( my ( $k, $v ) = each %$calls ) {
+		next if $k =~ /^#/;
+		next unless ref $v eq "REF";
+		$$dotout .=  "\"$name\" -> \"$k\";\n";
+		dotOut( $k, $$v );
+	    }
+	};
+    dotOut(@_);
     # Fix DB info about used files
     while( my ($f,$cnt) = each %$files ) {
 	    $database->{"#Files"}->{$f}->{"#Called"} += $cnt;
     }
     
-    sub out {
-	    my ( $name, $itm ) = @_;  # print("CK:$name\n");
-	    return if $itm->{"#Done"}++;
-	    foreach( @{$itm->{"#File"}}) {
-		    $files->{$_}++;
-	    }
-	    while ( my ( $k, $v ) = each %$itm ) {
-		next if $k =~ /^#/;
-		next unless ref $v eq "REF";
-		$$dotout .=  "\"$name\" -> \"$k\";\n";
-		out( $k, $$v );
-	    }
-	}
 }
 
 
 sub outNodes {
     my $dotout = shift;
-    my ( $name, $itm ) = @_;  # print("CK:$name\n");
+    my ( $name, $itm ) = @_;  
     my $files = $itm;
     while ( my ( $k, $v ) = each %$files ) {
 	    next unless $v->{"#Called"};
+	    print("CK Node:$k\n");
+	$DB::single=1;
 	    my $f = $k; 
 	    $f =~ s,^.*/,,;
 	    $$dotout .=  <<EOM;
 	    rankdir="LR";
 	    subgraph cluster_$nodenum {
 	    rankdir="TB";
-			style=filled;
-		color=lightgrey;
-		node [style=filled,color=white];
-		label = "$f";
+	    style=filled;
+	    color=lightgrey;
+	    node [style=filled,color=white];
+	    label = "$f";
 EOM
 	    foreach $n ( sort keys  %{$v->{"#Defined"}} ) {
 		    my $url = "";
@@ -178,9 +243,9 @@ EOM
 }
 
 sub load_tags {
+	my $tag = shift;
 	my $database = shift;
-	#Implicit tags file with line format
-	open(TAGS,"<","tags") or return;
+	open(TAGS,"<",$tag) or return;
 
 	my $sym={};
 	my $allFun = $database->{"#Functions"};
@@ -192,11 +257,14 @@ sub load_tags {
 		next unless -r $2;
 		next unless my $fun = $allFun->{$1};
 		next unless my $file= $fun->{"#File"};
+		my ($t,$f,$l) = ( $1,$2,$3);
 
 		foreach( @$file ) {
 			next unless my $thisFile = $allFiles->{$_};
-			$thisFile->{"#Source"} = $2;
-			$thisFile->{"#Defined"}->{$1} = $3;
+			my $m=$thisFile->{"#SomeSource"} ;
+			next if $m && ! ($f =~ m|/$m$|);
+			$thisFile->{"#Defined"}->{$t} = $l;
+			$thisFile->{"#Source"} = $f;
 		}
 
 		# $sym->{$2}->{$1} = $3;
@@ -214,6 +282,8 @@ sub load_sources {
     while( my ($file, $v) = each %$allFiles ) {
 	my $inFile = $v->{"#Source"};
 	my $outFile = $inFile;
+	# die Dumper($database) . "Ups? $file".Dumper($v)  unless $inFile;
+	next unless $inFile;
 	$outFile =~ s|/|_|g;
 	$outFile =~ s|^(\._)?||;
 	$outFile .= ".html";
@@ -221,25 +291,31 @@ sub load_sources {
 	$v->{"#HTML"} = $outFile;
     }
     my $htmls;
+    *patch_source = sub {
+	    my ($file,$v) = @_;
+		my $inFile = $v->{"#Source"};
+		warn "no: inFile $file" unless defined $inFile;
+		die "Double? Source:$inFile $file HTML:".$v->{"#HTML"} if $htmls->{$v->{"#HTML"}};
+		my @result = get_html($inFile);
+	       print STDERR "Read: $inFile  ($file) ($v->{'#HTML'})\n";
+	       foreach $f ( keys %{$v->{"#Links"}},keys %{$v->{"#Defined"}} ) {
+		   next unless my $fun = $database->{"#Functions"}->{$f};
+		   my $definedIn = $fun->{"#File"}[0];
+		   my $ref = $mapfile->{$definedIn} . "#cb1-" . $allFiles->{$definedIn}->{"#Defined"}->{$f};
+		   $urls->{$f} = $ref;
+		   grep {s|(<span id.*)(\b\Q$f\E\b)|$1<a href="$ref">$2</a>|} @result;
+	       }
+	       $htmls->{$v->{"#HTML"}} = \@result;
+       };
     while( my ($file, $v) = each %$allFiles ) {
-	my $inFile = $v->{"#Source"};
-
-	my @result = get_html($inFile);
-       print STDERR "Read: $inFile\n";
-       foreach $f ( keys %{$v->{"#Links"}} ) {
-	   next unless my $fun = $database->{"#Functions"}->{$f};
-	   my $definedIn = $fun->{"#File"}[0];
-	   my $ref = $mapfile->{$definedIn} . "#cb1-" . $allFiles->{$definedIn}->{"#Defined"}->{$f};
-	   $urls->{$f} = $ref;
-	   grep {s|(<span id.*)(\b\Q$f\E\b)|$1<a href="$ref">$2</a>|} @result;
-       }
-       $htmls->{$v->{"#HTML"}} = \@result;
+	patch_source($file,$v) if $v->{"#Source"};
     }
+    print STDERR "URL: ".Dumper($database->{"#URLS"});
     $database->{"#URLS"}=$urls;
+    print STDERR "URL: -> ".Dumper($database->{"#URLS"});
     #Dump outfiles...
-	$DB::single=1;
     while ( my ($fn,$content) = each %$htmls ) {
-	print STDERR "Writing: $html/$fn\n";
+	print STDERR "Writing: html/$fn\n";
 	open(my $of,">","html/$fn");
 	print $of @$content;
 	close $of;
@@ -295,4 +371,34 @@ function doit(hide) {
 </div>
 EOM
 
+}
+sub load_log {
+	my $f = shift;
+	open(my $in,"<",$f) or next;
+	my @dmp = <$in>;
+	close $in;
+	$database = parseDmp(\@dmp,$database);
+	# $database = loadFiles($database,$in);
+}
+sub load_db {
+	my $f = shift;
+	return unless -r $f;
+	$::VAR1={};
+	eval { do $f; };
+	my $db=$::VAR1;
+	my %ndb = ( %$database, %$db );
+	$database = \%ndb;
+}
+
+sub load_elf {
+	my $f = shift;
+	my $database = shift;
+	my @cmd = qw{objdump -t  -d -r};
+	open(my $dmp,"-|",@cmd,$f) or die "$?";
+	my @res = <$dmp>;
+	close($dmp);
+	$database = parseDmp(\@res,$database);
+
+	#die Dumper($database);
+	#die "nope $f";
 }
