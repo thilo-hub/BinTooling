@@ -15,12 +15,14 @@ use IPC::Open2;
 # Inputs accepted:
 #     *.o  : object files to be parsed by objdump
 #     *.db : perl-database containing all current state (to restore state)
+#     *.log : output from some objdump command ( -t -d -r, seems good.... )
 #     -savedb *.db :  Save database state into file
 #     analysis :  post process loaded objects and link relations (optional)
 #     tags : load source references also from tags file
 #            (future:  use '-g' from object format to find source locations )
 #     html : use pandoc to create annotated html sources (stored in ./html/* )
 #     *.dot : Create dot format of understood content  (url references to html files
+#     	      If the name matches function-XXXX.dot the function XXXX will be used as root instead of "main"
 #
 #  parsing of dot files:  dot   -Tsvg new.dot -o html/out.svg
 #
@@ -30,7 +32,6 @@ $Data::Dumper::Sortkeys = 1;
 $Data::Dumper::Purity = 1;
 use lib ".";
 $nodenum=1;
-# my $db = eval { do "./out1.db"};
 
 my $database = {};
 while (@ARGV) {
@@ -65,12 +66,14 @@ exit 0;
 
 sub save_dot {
 	my $dotfile=shift;
+
 	my $main="main";
+	$main = $1 if $dotfile =~ /^function[_\-](.*)\.dot$/;
 	my $dotout = "digraph \"$main\" {\n";
 
 	# load_sources($database);
-	$main=$database->{"#Functions"}{$main};
-	outCallChain( \$dotout,"main", $main );
+	my $mainf=$database->{"#Functions"}{$main};
+	outCallChain( \$dotout,$main, $mainf );
 	#print Dumper($database); exit 0;
 	outNodes(\$dotout,"TOP",$database->{"#Files"});
 	$dotout .= "\n}\n";
@@ -101,11 +104,13 @@ sub parseDmp {
 
 	my $recordFile = sub {
 		$file = shift;
+		$file =~ s/\@plt//;
 	    	$currentFile     = \$database->{"#Files"}->{$file};
 
 	};
 	my $recordFun = sub { 
 	    $fun = shift; 
+	    $fun =~ s/(\@plt)?([+-]0x[0-9a-f]*)?$//;
 	    $currentFunction = \$database->{"#Functions"}->{$fun};
 	    push @{$$currentFunction->{"#File"}}, $file;
 
@@ -113,19 +118,23 @@ sub parseDmp {
 	};
 	my $recordRefer = sub {
 	    my $fun = shift;
+	    $fun =~ s/(\@plt)?([+-]0x[0-9a-f]*)?$//;
 	    $$currentFunction->{"#Calls"}->{$fun}++;
 	    # Not used here, tags sets these 
 	     $$currentFile->{"#Links"}->{$fun}++;
 
 
 	};
+	# 2085ab:       e9 c0 fb ff ff          jmpq   208170 <atexit@plt-0x10>
+	# 00000000002085b0 <kill@plt>:
+
 	foreach( @$dmp) {
 	    chomp;
 	    &$recordFile($1) if /^(.*):\s+file\s+format/;
 	    $$currentFile->{"#SomeSource"} = $1 if /\sdf\s+\*ABS\*\s+0+\s(.*\.c)$/;
 	    &$recordFun($1) if /^[0-9a-f]+\s<([^>]+)>/;
 	    &$recordRefer($1)  if /: R_[A-Z0-9_]+\s+([^\.]\S+?)(\+0x[0-9a-f]+)?$/;
-	    &$recordRefer($1)  if /:\s.* <(\S+)\@plt>/;
+	    &$recordRefer($1)  if /:\s.* <(\S+)?>/;
 	}
 	return $database;
 }
@@ -233,7 +242,7 @@ EOM
 		    my $url = "";
 		    my $u = $database->{"#URLS"}->{$n};
 		    $url = "URL=\"$u\"" if $u;
-		    $$dotout .= "    $n [$url];\n";
+		    $$dotout .= "    \"$n\" [$url];\n";
 	    }
 	    #$$dotout .=  "   ".join(";\n   ", sort keys %{$v->{"#Defined"}} ).";\n";
 	    $$dotout .=  "}\n";
